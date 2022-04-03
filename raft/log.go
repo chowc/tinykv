@@ -14,7 +14,9 @@
 
 package raft
 
-import pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+import (
+	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+)
 
 // RaftLog manage the log entries, its struct look like:
 //
@@ -42,7 +44,7 @@ type RaftLog struct {
 	// Everytime handling `Ready`, the unstabled logs will be included.
 	stabled uint64
 
-	// all entries that have not yet compact.
+	// all entries that have not yet compact. 一部分可能已经是 stable 的。
 	entries []pb.Entry
 
 	// the incoming unstable snapshot, if any.
@@ -56,7 +58,27 @@ type RaftLog struct {
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
 	// Your Code Here (2A).
-	return nil
+	fi, err := storage.FirstIndex()
+	if err != nil {
+		panic(err)
+	}
+	li, err := storage.LastIndex()
+	if err != nil {
+		panic(err)
+	}
+	entries, err := storage.Entries(fi, li+1)
+	if err != nil {
+		panic(err)
+	}
+	hardState, _, _ := storage.InitialState()
+	return &RaftLog{
+		storage:         storage,
+		committed:       hardState.Commit,
+		applied:         fi-1,
+		stabled:         li,
+		entries:         entries,
+		pendingSnapshot: nil,
+	}
 }
 
 // We need to compact the log entries in some point of time like
@@ -69,23 +91,78 @@ func (l *RaftLog) maybeCompact() {
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
-	return nil
+	// TODO: 这里包不包括 l.stabled？
+	// stabled 是 entry index
+	var begin int
+	for idx, ent := range l.entries {
+		if ent.Index == l.stabled {
+			begin = idx+1
+		}
+	}
+	if begin >= len(l.entries) {
+		return []pb.Entry{}
+	}
+	return l.entries[begin:]
 }
 
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
-	return nil
+	// log[applied: committed]
+	// applied/committed 可能在 l.storage 里，所以要和 l.stable 比较
+	sub := l.committed - l.applied
+	var begin int
+	for idx, ent := range l.entries {
+		if ent.Index == l.applied {
+			begin = idx+1
+			break
+		}
+	}
+	if begin >= len(l.entries) {
+		return nil
+	}
+	return l.entries[begin: uint64(begin)+sub]
 }
 
-// LastIndex return the last index of the log entries
+// LastIndex return the last index of the log entries. next entry index should +1
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	return 0
+	if len(l.entries) > 0 {
+		return l.entries[len(l.entries)-1].Index
+	}
+	li, err := l.storage.LastIndex()
+	if err != nil {
+		panic(err)
+	}
+	return li
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	return 0, nil
+	if i == 0 {
+		return 0, nil
+	}
+	if len(l.entries) > 0 && l.entries[0].Index <= i {
+		idx := i-l.entries[0].Index
+		if idx >= uint64(len(l.entries)) {
+			return 0, nil
+		}
+		return l.entries[idx].Term, nil
+	}
+	term, err := l.storage.Term(i)
+	if err != nil {
+		return 0, nil
+	}
+	return term, nil
+}
+
+// TrimToIndex deletes entries whose index >= end
+func (l *RaftLog) TrimToIndex(end uint64) {
+	for idx := range l.entries {
+		if l.entries[idx].Index == end {
+			l.entries = l.entries[0:idx]
+			return
+		}
+	}
 }

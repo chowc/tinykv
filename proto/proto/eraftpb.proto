@@ -19,6 +19,7 @@ enum EntryType {
 message Entry {
     EntryType entry_type = 1;
     uint64 term = 2;
+    // the index of this entry in log
     uint64 index = 3;
     bytes data = 4;
 }
@@ -72,8 +73,12 @@ message Message {
     MessageType msg_type = 1;
     uint64 to = 2;
     uint64 from = 3;
+    // Current term of the sender
     uint64 term = 4;
+    // The term when this log entry is appended.
+    // Each log entry stores a state machine command along with the term number when the entry was received by the leader.
     uint64 log_term = 5;
+    // For MessageType_MsgAppend, it's the begin index of proposed entries; for MessageType_MsgAppendResp, it's the index of the last committed entry.
     uint64 index = 6;
     repeated Entry entries = 7;
     uint64 commit = 8;
