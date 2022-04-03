@@ -145,9 +145,9 @@ func (rn *RawNode) Ready() Ready {
 	return Ready{
 		SoftState:        nil,
 		HardState:        pb.HardState{},
-		Entries:          nil,
+		Entries:          rn.Raft.RaftLog.unstableEntries(),
 		Snapshot:         pb.Snapshot{},
-		CommittedEntries: nil,
+		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
 		Messages:         rn.Raft.msgs,
 	}
 }
@@ -155,13 +155,15 @@ func (rn *RawNode) Ready() Ready {
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
-	return false
+	rd := rn.Ready()
+	return len(rd.Entries) > 0 || len(rd.CommittedEntries) > 0 || len(rd.Messages) > 0
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
+	rn.Raft.RaftLog.Advance(uint64(len(rd.Entries)), uint64(len(rd.CommittedEntries)))
 }
 
 // GetProgress return the Progress of this node and its peers, if this

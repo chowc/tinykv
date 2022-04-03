@@ -166,3 +166,8 @@ func (l *RaftLog) TrimToIndex(end uint64) {
 		}
 	}
 }
+
+func (l *RaftLog) Advance(stabledAdd, appliedAdd uint64) {
+	l.applied += appliedAdd
+	l.stabled += stabledAdd
+}

@@ -160,8 +160,6 @@ type Raft struct {
 	// value.
 	// (Used in 3A conf change)
 	PendingConfIndex uint64
-
-	TickFn func(r *Raft)
 }
 
 // newRaft return a raft peer with the given config
@@ -192,7 +190,6 @@ func newRaft(c *Config) *Raft {
 		electionElapsed:       0,
 		leadTransferee:        0,
 		PendingConfIndex:      0,
-		TickFn:                tickElection,
 	}
 	hardState, _, _ := r.RaftLog.storage.InitialState()
 	r.Vote = hardState.Vote
@@ -250,10 +247,17 @@ func (r *Raft) sendHeartbeat() {
 
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
-	r.TickFn(r)
+	switch r.State {
+	case StateLeader:
+		r.tickHeartbeat()
+	case StateCandidate:
+		r.tickElection()
+	case StateFollower:
+		r.tickElection()
+	}
 }
 
-func tickElection(r *Raft) {
+func (r *Raft) tickElection() {
 	r.heartbeatElapsed++
 	r.electionElapsed++
 	if r.electionElapsed >= r.electionTimeout {
@@ -271,7 +275,7 @@ func tickElection(r *Raft) {
 	}
 }
 
-func tickHeartbeat(r *Raft) {
+func (r *Raft) tickHeartbeat() {
 	r.heartbeatElapsed++
 	r.electionElapsed++
 	if r.heartbeatElapsed >= r.heartbeatTimeout {
@@ -291,7 +295,6 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.Lead = lead
 	r.Term = term
 	r.Vote = None
-	r.TickFn = tickElection
 }
 
 // becomeCandidate transform this peer's state to candidate
@@ -304,7 +307,6 @@ func (r *Raft) becomeCandidate() {
 	votes[r.id] = true
 	r.votes = votes
 	r.Term++
-	r.TickFn = tickElection
 	r.electionTimeout = r.originElectionTimeout + rand.Intn(r.originElectionTimeout)
 	if len(r.Prs) == 1 {
 		r.becomeLeader()
@@ -327,7 +329,6 @@ func (r *Raft) becomeLeader() {
 	// NOTE: Leader should propose a noop entry on its term
 	r.Lead = r.id
 	r.State = StateLeader
-	r.TickFn = tickHeartbeat
 	r.Vote = None
 	r.RaftLog.entries = append(r.RaftLog.entries, pb.Entry{
 		EntryType: pb.EntryType_EntryNormal,
