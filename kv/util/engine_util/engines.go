@@ -13,10 +13,11 @@ import (
 type Engines struct {
 	// Data, including data which is committed (i.e., committed across other nodes) and un-committed (i.e., only present
 	// locally).
+	// kvdb stores key-value data in different column families, RegionLocalState and RaftApplyState. You can regard kvdb as the state machine mentioned in Raft paper
 	Kv     *badger.DB
 	KvPath string
 	// Metadata used by Raft.
-	Raft     *badger.DB
+	Raft     *badger.DB // raftdb stores raft log and RaftLocalState
 	RaftPath string
 }
 

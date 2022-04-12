@@ -2,6 +2,7 @@ package raftstore
 
 import (
 	"bytes"
+	"golang.org/x/net/context"
 	"sync"
 	"time"
 
@@ -98,6 +99,7 @@ type GlobalContext struct {
 	splitCheckTaskSender chan<- worker.Task
 	schedulerClient      scheduler_client.Client
 	tickDriverSender     chan uint64
+	context.Context
 }
 
 type Transport interface {

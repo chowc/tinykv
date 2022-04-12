@@ -15,6 +15,7 @@
 package raft
 
 import (
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -52,6 +53,7 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
+	id uint64
 }
 
 // newLog returns log using the given storage. It recovers the log
@@ -67,6 +69,26 @@ func newLog(storage Storage) *RaftLog {
 		panic(err)
 	}
 	entries, err := storage.Entries(fi, li+1)
+	// if err == ErrUnavailable {
+	// 	// find in snapshot
+	// 	for {
+	// 		snapshot, err := storage.Snapshot()
+	// 		if err == ErrSnapshotTemporarilyUnavailable {
+	// 			time.Sleep(100 * time.Millisecond)
+	// 			log.Debugf("waiting for snapshot")
+	// 			continue
+	// 		}
+	// 		if err != nil {
+	// 			panic(err)
+	// 		}
+	// 		snapData := new(rspb.RaftSnapshotData)
+	// 		if err := snapData.Unmarshal(snapshot.Data); err != nil {
+	// 			panic(err)
+	// 		}
+	// 		log.Debugf("snapData: %v", snapData.Data)
+	// 		break
+	// 	}
+	// }
 	if err != nil {
 		panic(err)
 	}
@@ -118,7 +140,9 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 			break
 		}
 	}
+	log.Debugf("peer [%d] nextEnts l.committed %d l.applied %d", l.id, l.committed, l.applied)
 	if begin >= len(l.entries) {
+		log.Debugf("peer [%d] nextEnts return empty entries", l.id)
 		return nil
 	}
 	return l.entries[begin: uint64(begin)+sub]
@@ -167,7 +191,6 @@ func (l *RaftLog) TrimToIndex(end uint64) {
 	}
 }
 
-func (l *RaftLog) Advance(stabledAdd, appliedAdd uint64) {
-	l.applied += appliedAdd
-	l.stabled += stabledAdd
+func (l *RaftLog) Info() (uint64, uint64) {
+	return l.applied, l.committed
 }

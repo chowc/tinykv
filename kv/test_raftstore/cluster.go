@@ -83,6 +83,7 @@ func (c *Cluster) Start() {
 		}
 
 		raftDB := engine_util.CreateDB(raftPath, true)
+
 		kvDB := engine_util.CreateDB(kvPath, false)
 		engine := engine_util.NewEngines(kvDB, raftDB, kvPath, raftPath)
 		c.engines[storeID] = engine
@@ -188,6 +189,7 @@ func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.D
 		regionID := region.GetId()
 		req := NewRequest(regionID, region.RegionEpoch, reqs)
 		resp, txn := c.CallCommandOnLeader(&req, timeout)
+		log.Debugf("CallCommandOnLeader: resp %+v", resp)
 		if resp == nil {
 			// it should be timeouted innerly
 			SleepMS(100)

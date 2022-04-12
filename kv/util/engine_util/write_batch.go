@@ -3,6 +3,7 @@ package engine_util
 import (
 	"github.com/Connor1996/badger"
 	"github.com/golang/protobuf/proto"
+	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap/errors"
 )
 
@@ -26,6 +27,7 @@ func (wb *WriteBatch) Len() int {
 	return len(wb.entries)
 }
 
+// SetCF set kv db key-value
 func (wb *WriteBatch) SetCF(cf string, key, val []byte) {
 	wb.entries = append(wb.entries, &badger.Entry{
 		Key:   KeyWithCF(cf, key),
@@ -42,12 +44,14 @@ func (wb *WriteBatch) DeleteMeta(key []byte) {
 }
 
 func (wb *WriteBatch) DeleteCF(cf string, key []byte) {
+	log.Debugf("DeleteCF key [%v]", key)
 	wb.entries = append(wb.entries, &badger.Entry{
 		Key: KeyWithCF(cf, key),
 	})
 	wb.size += len(key)
 }
 
+// SetMeta set raftdb key-value
 func (wb *WriteBatch) SetMeta(key []byte, msg proto.Message) error {
 	val, err := proto.Marshal(msg)
 	if err != nil {
@@ -71,14 +75,17 @@ func (wb *WriteBatch) RollbackToSafePoint() {
 	wb.size = wb.safePointSize
 }
 
+// WriteToDB 将 raft.Entries 应用到 db 上，按照 entry.Index 顺序执行
 func (wb *WriteBatch) WriteToDB(db *badger.DB) error {
 	if len(wb.entries) > 0 {
 		err := db.Update(func(txn *badger.Txn) error {
 			for _, entry := range wb.entries {
 				var err1 error
 				if len(entry.Value) == 0 {
+					log.Debugf("Delete: %+v", entry)
 					err1 = txn.Delete(entry.Key)
 				} else {
+					log.Debugf("SetEntry: %+v", entry)
 					err1 = txn.SetEntry(entry)
 				}
 				if err1 != nil {

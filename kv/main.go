@@ -63,7 +63,6 @@ func main() {
 		MinTime:             2 * time.Second, // If a client pings more than once every 2 seconds, terminate the connection
 		PermitWithoutStream: true,            // Allow pings even when there are no active streams
 	}
-
 	grpcServer := grpc.NewServer(
 		grpc.KeepaliveEnforcementPolicy(alivePolicy),
 		grpc.InitialWindowSize(1<<30),

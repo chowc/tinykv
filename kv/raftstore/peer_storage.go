@@ -30,6 +30,7 @@ type ApplySnapResult struct {
 
 var _ raft.Storage = new(PeerStorage)
 
+// raft.RaftLog.storage
 type PeerStorage struct {
 	// current region information of the peer
 	region *metapb.Region
@@ -98,8 +99,10 @@ func (ps *PeerStorage) Entries(low, high uint64) ([]eraftpb.Entry, error) {
 	endKey := meta.RaftLogKey(ps.region.Id, high)
 	iter := txn.NewIterator(badger.DefaultIteratorOptions)
 	defer iter.Close()
+	log.Debugf("region [%d] low %d, high %d, startKey %v, endKey %v", ps.region.Id, low, high, startKey, endKey)
 	for iter.Seek(startKey); iter.Valid(); iter.Next() {
 		item := iter.Item()
+		log.Debugf("item key: [%v]", item.Key())
 		if bytes.Compare(item.Key(), endKey) >= 0 {
 			break
 		}
@@ -308,6 +311,36 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	// Your Code Here (2B).
+	if len(entries) == 0 {
+		return nil
+	}
+
+	first, _ := ps.FirstIndex()
+	lastEntry := entries[len(entries)-1]
+	firstEntry := entries[0]
+	if first > lastEntry.Index {
+		return nil
+	}
+	if first > firstEntry.Index {
+		entries = entries[first-firstEntry.Index:]
+	}
+
+	lastIndex := ps.raftState.LastIndex
+
+	for _, ent := range entries {
+		key := meta.RaftLogKey(ps.region.Id, ent.Index)
+		raftWB.SetMeta(key, &ent)
+		log.Debugf("peer write entry to raft db: index [%d], key [%v]", ent.Index, key)
+	}
+
+	log.Debugf("delete entry range [%d, %d)", lastEntry.Index+1, lastIndex)
+	for i:=lastEntry.Index+1; i<lastIndex; i++ {
+		key := meta.RaftLogKey(ps.region.Id, i)
+		log.Debugf("DeleteMeta entry [%d]", i)
+		raftWB.DeleteMeta(key) // delete
+	}
+	ps.raftState.LastIndex = lastEntry.Index
+	ps.raftState.LastTerm = lastEntry.Term
 	return nil
 }
 
@@ -331,7 +364,31 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
-	return nil, nil
+	var result *ApplySnapResult
+	raftBatch := engine_util.WriteBatch{}
+
+	var err error
+	if !raft.IsEmptySnap(&ready.Snapshot) {
+		kvWB := new(engine_util.WriteBatch)
+		result, err = ps.ApplySnapshot(&ready.Snapshot, kvWB, &raftBatch)
+		kvWB.WriteToDB(ps.Engines.Kv)
+		if err != nil {
+			return result, err
+		}
+	}
+
+	if err := ps.Append(ready.Entries, &raftBatch); err != nil {
+		return nil, err
+	}
+	if !raft.IsEmptyHardState(ready.HardState) {
+		ps.raftState.HardState = &ready.HardState
+	}
+	raftBatch.SetMeta(meta.RaftStateKey(ps.region.GetId()), ps.raftState)
+	if err := ps.Engines.WriteRaft(&raftBatch); err != nil {
+		log.Errorf("WriteRaft fail: %v", err)
+		return nil, err
+	}
+	return result, nil
 }
 
 func (ps *PeerStorage) ClearData() {

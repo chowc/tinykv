@@ -43,6 +43,7 @@ const (
 type Msg struct {
 	Type     MsgType
 	RegionID uint64
+	// channel
 	Data     interface{}
 }
 

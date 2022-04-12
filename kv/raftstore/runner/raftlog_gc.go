@@ -35,7 +35,7 @@ func (r *raftLogGCTaskHandler) gcRaftLog(raftDb *badger.DB, regionId, startIdx, 
 			startKey := meta.RaftLogKey(regionId, 0)
 			ite := txn.NewIterator(badger.DefaultIteratorOptions)
 			defer ite.Close()
-			if ite.Seek(startKey); ite.Valid() {
+			if ite.Seek(startKey); ite.Valid() { // find a valid index in db
 				var err error
 				if firstIdx, err = meta.RaftLogIndex(ite.Item().Key()); err != nil {
 					return err

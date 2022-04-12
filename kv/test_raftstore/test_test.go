@@ -207,7 +207,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 				if (rand.Int() % 1000) < 500 {
 					key := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
 					value := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
-					// log.Infof("%d: client new put %v,%v\n", cli, key, value)
+					// log.Infof("%d: client new put key=[%v], value=[%v]\n", cli, key, value)
 					cluster.MustPut([]byte(key), []byte(value))
 					last = NextValue(last, value)
 					j++
@@ -219,7 +219,9 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 					v := string(bytes.Join(values, []byte("")))
 					if v != last {
 						log.Fatalf("get wrong value, client %v\nwant:%v\ngot: %v\n", cli, last, v)
-					}
+					}/* else {
+						log.Infof("get right value, client %v\nwant:%v\ngot: %v\n", cli, last, v)
+					}*/
 				}
 			}
 		})
@@ -373,6 +375,7 @@ func TestOnePartition2B(t *testing.T) {
 		s1: s1,
 		s2: s2,
 	})
+	log.Infof("leader: %d, s1: %v, s2: %v", leader, s1, s2)
 	cluster.MustPut([]byte("k1"), []byte("v1"))
 	cluster.MustGet([]byte("k1"), []byte("v1"))
 	MustGetNone(cluster.engines[s2[0]], []byte("k1"))
