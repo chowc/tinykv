@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"math/rand"
-	_ "net/http/pprof"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -281,6 +280,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			end := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
 			values := cluster.Scan([]byte(start), []byte(end))
 			v := string(bytes.Join(values, []byte("")))
+			log.Debugf("v = %s", v)
 			checkClntAppends(t, cli, v, j)
 
 			for k := 0; k < j; k++ {

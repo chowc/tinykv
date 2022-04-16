@@ -47,14 +47,14 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		return
 	}
 	// Your Code Here (2B).
-	// if !d.RaftGroup.HasReady() {
-	// 	return
-	// }
-	rd := d.RaftGroup.Ready()
-	if len(rd.Entries) > 0 {
-		d.peerStorage.SaveReadyState(&rd)
+	if !d.RaftGroup.HasReady() {
+		return
 	}
-	// log.Infof("peer [%s] ready: %+v", d.Tag, rd)
+	rd := d.RaftGroup.Ready()
+	_, err := d.peerStorage.SaveReadyState(&rd)
+	if err != nil {
+		panic(err)
+	}
 	d.Send(d.ctx.trans, rd.Messages)
 	if len(rd.CommittedEntries) == 0 {
 		d.RaftGroup.Advance(rd)
@@ -65,10 +65,6 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	log.Debugf("peer [%d] HandleRaftReady: entries %d committed entry %d", raftID, len(rd.Entries), len(rd.CommittedEntries))
 	wb := &engine_util.WriteBatch{}
 	for _, ent := range rd.CommittedEntries {
-		// if len(ent.Data) == 0 {
-		// 	log.Debugf("peer [%d] HandleRaftReady: empty entry [%d], skip", raftID, ent.Index)
-		// 	continue
-		// }
 		var msg raft_cmdpb.RaftCmdRequest
 
 		if err := msg.Unmarshal(ent.Data); err != nil {
@@ -76,6 +72,14 @@ func (d *peerMsgHandler) HandleRaftReady() {
 			return
 		}
 		log.Debugf("peer [%d] HandleRaftReady: apply entry to raft db: index [%d], msg %v", raftID, ent.Index, msg)
+		if msg.AdminRequest != nil {
+			log.Debugf("peer [%d] handle admin request %v", raftID, msg)
+			d.handleAdminRequest(&msg, wb)
+			if err := d.peerStorage.Engines.WriteKV(wb); err != nil {
+				log.Errorf("WriteKV fail: %+v", err)
+			}
+			wb = &engine_util.WriteBatch{}
+		}
 
 		for _, request := range msg.Requests {// 非 leader 没有 proposal，所以要先 apply 到 kvdb
 			switch request.CmdType {
@@ -87,7 +91,6 @@ func (d *peerMsgHandler) HandleRaftReady() {
 				wb.DeleteCF(request.Delete.Cf, request.Delete.Key)
 			}
 		}
-		// 变成了 follower，这个时候要把 proposal 清掉
 		d.handlePropose(ent, func(proposal *proposal) {
 			log.Debugf("peer [%d] handlePropose: proposal %v, msg: %v", raftID, proposal, msg)
 
@@ -99,6 +102,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 				switch request.CmdType {
 				case raft_cmdpb.CmdType_Get:
 					d.peerStorage.applyState.AppliedIndex = ent.Index
+					log.Debugf("peer [%d] set AppliedIndex to %d", raftID, d.peerStorage.applyState.AppliedIndex)
 					if err := wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState); err != nil {
 						log.Errorf("SetMeta fail: %v", err)
 						proposal.cb.Done(ErrResp(err))
@@ -139,6 +143,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 						return
 					}
 					d.peerStorage.applyState.AppliedIndex = ent.Index
+					log.Debugf("peer [%d] set AppliedIndex to %d", raftID, d.peerStorage.applyState.AppliedIndex)
 					if err := wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState); err != nil {
 						log.Errorf("SetMeta fail: %v", err)
 						proposal.cb.Done(ErrResp(err))
@@ -164,6 +169,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		})
 	}
 	d.peerStorage.applyState.AppliedIndex = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
+	log.Debugf("peer [%d] set AppliedIndex to %d", raftID, d.peerStorage.applyState.AppliedIndex)
 	if err := wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState); err != nil {
 		log.Errorf("SetMeta fail: %v", err)
 	}
@@ -171,6 +177,19 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		log.Errorf("WriteKV fail: %+v", err)
 	}
 	d.RaftGroup.Advance(rd)
+}
+
+func getRequestKey(req *raft_cmdpb.Request) []byte {
+	switch req.CmdType {
+	case raft_cmdpb.CmdType_Put:
+		return req.Put.Key
+	case raft_cmdpb.CmdType_Delete:
+		return req.Delete.Key
+	case raft_cmdpb.CmdType_Get:
+		return req.Get.Key
+
+	}
+	return nil
 }
 
 func (d *peerMsgHandler) handlePropose(ent eraftpb.Entry, fn func(proposal *proposal)) {
@@ -281,6 +300,21 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	d.RaftGroup.Propose(data)
 }
 
+func (d *peerMsgHandler) handleAdminRequest(msg *raft_cmdpb.RaftCmdRequest, wb *engine_util.WriteBatch) {
+	switch msg.AdminRequest.CmdType {
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		compact := msg.AdminRequest.CompactLog
+		if compact.CompactIndex >= d.peerStorage.applyState.TruncatedState.Index {
+			d.peerStorage.applyState.TruncatedState = &rspb.RaftTruncatedState{
+				Index:                compact.CompactIndex,
+				Term:                 compact.CompactTerm,
+			}
+			wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+			d.ScheduleCompactLog(compact.CompactIndex)
+		}
+	}
+}
+
 func (d *peerMsgHandler) onTick() {
 	if d.stopped {
 		return
@@ -316,6 +350,7 @@ func (d *peerMsgHandler) onRaftBaseTick() {
 }
 
 func (d *peerMsgHandler) ScheduleCompactLog(truncatedIndex uint64) {
+	// compact range [d.LastCompactedIdx, truncatedIndex + 1]
 	raftLogGCTask := &runner.RaftLogGCTask{
 		RaftEngine: d.ctx.engine.Raft,
 		RegionID:   d.regionId,

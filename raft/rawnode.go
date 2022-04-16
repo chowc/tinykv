@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -143,7 +144,8 @@ func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
 	msg := rn.Raft.msgs
 	rn.Raft.msgs = nil
-	return Ready{
+
+	rd := Ready{
 		SoftState:        nil,
 		HardState:        pb.HardState{},
 		Entries:          rn.Raft.RaftLog.unstableEntries(),
@@ -151,12 +153,19 @@ func (rn *RawNode) Ready() Ready {
 		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
 		Messages:         msg,
 	}
+	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
+		log.Debugf("peer [%d] got snapshot", rn.Raft.id)
+		rd.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
+		rn.Raft.RaftLog.pendingSnapshot = nil
+	}
+	return rd
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
-	return len(rn.Raft.RaftLog.unstableEntries()) > 0 || len(rn.Raft.RaftLog.nextEnts()) > 0 || len(rn.Raft.msgs) > 0
+	return len(rn.Raft.RaftLog.unstableEntries()) > 0 || len(rn.Raft.RaftLog.nextEnts()) > 0 || len(rn.Raft.msgs) > 0 ||
+		!IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot)
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
@@ -170,7 +179,7 @@ func (rn *RawNode) Advance(rd Ready) {
 	if len(rd.CommittedEntries) > 0 {
 		newApplied = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
 	}
-	rn.Raft.Advance(newStabled, newApplied, uint64(len(rd.Messages)))
+	rn.Raft.Advance(newStabled, newApplied)
 }
 
 // GetProgress return the Progress of this node and its peers, if this

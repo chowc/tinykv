@@ -181,6 +181,9 @@ func newRaft(c *Config) *Raft {
 		peers[peer] = &Progress{}
 	}
 	l := newLog(c.Storage)
+	if c.Applied > 0 {
+		l.applied = c.Applied
+	}
 	l.id = c.ID
 	r := &Raft{
 		id:   c.ID,
@@ -212,18 +215,29 @@ func (r *Raft) GetID() uint64 {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
+	if r.State != StateLeader {
+		return false
+	}
 	progress := r.Prs[to]
+	// 如果 progress.Next 被 compact 了，prevIndex 也一定被 compact 了，所以判断 prevIndex 还存不存在
 	prevIndex := progress.Next-1
-
-	prevTerm, _ := r.RaftLog.Term(prevIndex)
+	prevTerm, err := r.RaftLog.Term(prevIndex)
+	log.Debugf("peer [%d] sendAppend -> [%d], prevIndex %d, prevTerm %d, committed %d, applied %d, progress.Next %d, len(r.RaftLog.entries) %d li %d",
+		r.id, to, prevIndex, prevTerm, r.RaftLog.committed, r.RaftLog.applied, progress.Next, len(r.RaftLog.entries), r.RaftLog.LastIndex())
+	if err != nil {
+		if err == ErrCompacted {
+			r.sendSnapshot(to)
+			return false
+		}
+		panic(err)
+	}
 	var entries []*pb.Entry
 	for idx, ent := range r.RaftLog.entries {
 		if ent.Index > prevIndex {
 			entries = append(entries, &r.RaftLog.entries[idx])
 		}
 	}
-	log.Debugf("peer [%d] sendAppend -> [%d], prevIndex %d, prevTerm %d, committed %d, applied %d",
-		r.id, to, prevIndex, prevTerm, r.RaftLog.committed, r.RaftLog.applied)
+
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType:              pb.MessageType_MsgAppend,
 		To:                   to,
@@ -235,6 +249,23 @@ func (r *Raft) sendAppend(to uint64) bool {
 		Commit:               r.RaftLog.committed,
 	})
 	return true
+}
+
+func (r *Raft) sendSnapshot(to uint64) {
+	log.Debugf("peer [%d] sendSnapshot to [%d]", r.id, to)
+	snap, err := r.RaftLog.storage.Snapshot()
+	if err != nil {
+		log.Infof("get snapshot fail: %v", err)
+		return
+	}
+	log.Debugf("peer [%d] sendSnapshot to [%d], %v", r.id, to, snap)
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType:              pb.MessageType_MsgSnapshot,
+		From:                 r.id,
+		To:                   to,
+		Term:                 r.Term,
+		Snapshot:             &snap,
+	})
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
@@ -396,6 +427,9 @@ func (r *Raft) Step(m pb.Message) error {
 	case pb.MessageType_MsgHeartbeatResponse:
 		r.handleHeartbeatResponse(m)
 		return nil
+	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
+		return nil
 	case pb.MessageType_MsgRequestVoteResponse:
 		log.Debugf("VoteResponse [%d], msg: %+v", r.id, m)
 		if r.State != StateCandidate {
@@ -520,6 +554,7 @@ func (r *Raft) bcastAppend() {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
+	log.Debugf("peer [%d] handleAppendEntries from %d, msg %v", r.id, m.From, m)
 	if m.Term < r.Term {
 		return
 	}
@@ -547,6 +582,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			goto reject
 		}
 		li:= r.RaftLog.LastIndex()
+		log.Debugf("peer [%d] lastindex %d, m.Index %d, m.entries %v", r.id, li, m.Index, m.Entries)
 		if m.Index > li { // follower 的日志和 message 的 entries 不能对接上
 			goto reject
 		}
@@ -611,6 +647,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		return
 	}
 reject:
+	log.Debugf("peer [%d] reject append from [%d]", r.id, m.From)
 	li := r.RaftLog.LastIndex()
 	term, _ := r.RaftLog.Term(li)
 	r.msgs = append(r.msgs, pb.Message{
@@ -628,6 +665,7 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	if r.State != StateLeader {
 		return
 	}
+	log.Debugf("peer [%d] handleAppendResponse from %d, msg %v", r.id, m.From, m)
 	progress := r.Prs[m.From]
 	if m.Reject == true {
 		// TODO: binary search
@@ -731,7 +769,9 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	})
 }
 
-func (r *Raft) handleHeartbeatResponse(m pb.Message) {}
+func (r *Raft) handleHeartbeatResponse(m pb.Message) {
+	r.sendAppend(m.From)
+}
 
 func (r *Raft) handlePropose(m pb.Message) {
 	if r.State != StateLeader {
@@ -759,18 +799,74 @@ func (r *Raft) handlePropose(m pb.Message) {
 	r.bcastAppend()
 }
 
-func (r *Raft) Advance(newStabled, newApplied, msgsLen uint64) {
+func (r *Raft) Advance(newStabled, newApplied uint64) {
 	if r.RaftLog.applied < newApplied {
 		r.RaftLog.applied = newApplied
 	}
 	if r.RaftLog.stabled < newStabled {
 		r.RaftLog.stabled = newStabled
 	}
+	r.RaftLog.maybeCompact()
 }
 
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	log.Debugf("peer [%d] handleSnapshot myterm %d, msg %v", r.id, r.Term, m)
+	if m.Snapshot == nil {
+		return
+	}
+	snapIndex := m.Snapshot.Metadata.Index
+	snapTerm := m.Snapshot.Metadata.Term
+	log.Debugf("snapIndex %d, snapTerm %d, r.RaftLog.committed %d, r.RaftLog.applied %d", snapIndex, snapTerm, r.RaftLog.committed, r.RaftLog.applied)
+	if snapIndex <= r.RaftLog.committed { // stale snapshot
+		li := r.RaftLog.LastIndex()
+		term, _ := r.RaftLog.Term(li)
+		r.msgs = append(r.msgs, pb.Message{
+			MsgType:              pb.MessageType_MsgAppendResponse,
+			To:                   m.From,
+			From:                 r.id,
+			Term:                 r.Term,
+			LogTerm:              term,
+			Index:                li,
+		})
+		log.Debugf("peer [%d] stale snapshot, lastindex %d, lastterm %d, dont apply", r.id, li, term)
+		return
+	}
+	if r.Term > m.Term {
+		return
+	}
+	r.Lead = m.From
+	r.RaftLog.applied = snapIndex
+	r.RaftLog.committed = snapIndex
+	if r.RaftLog.compactIndex < r.RaftLog.applied {
+		r.RaftLog.compactIndex = snapIndex
+		r.RaftLog.compactTerm = snapTerm
+	}
+	newPrs := make(map[uint64]*Progress)
+
+	for _, node := range m.Snapshot.Metadata.ConfState.Nodes {
+		if v, ok := r.Prs[node]; !ok {
+			newPrs[node] = &Progress{
+				Match: 0,
+				Next:  1,
+			}
+		} else {
+			newPrs[node] = v
+		}
+	}
+	r.Prs = newPrs
+	li := max(r.RaftLog.LastIndex(), r.RaftLog.compactIndex)
+	term, _ := r.RaftLog.Term(li)
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType:              pb.MessageType_MsgAppendResponse,
+		To:                   m.From,
+		From:                 r.id,
+		Term:                 r.Term,
+		LogTerm:              term,
+		Index:                li,
+	})
+	r.RaftLog.pendingSnapshot = m.Snapshot
 }
 
 // addNode add a new node to raft group

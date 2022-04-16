@@ -40,6 +40,7 @@ type RaftLog struct {
 	// Invariant: applied <= committed
 	applied uint64
 
+	// 已经 committed 的要保证已经持久化，而持久化的非 committed 可以被删除（例如：peer_storage.Append 会覆盖）
 	// log entries with index <= stabled are persisted to storage.
 	// It is used to record the logs that are not persisted by storage yet.
 	// Everytime handling `Ready`, the unstabled logs will be included.
@@ -54,6 +55,9 @@ type RaftLog struct {
 
 	// Your Data Here (2A).
 	id uint64
+
+	compactIndex uint64
+	compactTerm uint64
 }
 
 // newLog returns log using the given storage. It recovers the log
@@ -68,38 +72,16 @@ func newLog(storage Storage) *RaftLog {
 	if err != nil {
 		panic(err)
 	}
-	entries, err := storage.Entries(fi, li+1)
-	// if err == ErrUnavailable {
-	// 	// find in snapshot
-	// 	for {
-	// 		snapshot, err := storage.Snapshot()
-	// 		if err == ErrSnapshotTemporarilyUnavailable {
-	// 			time.Sleep(100 * time.Millisecond)
-	// 			log.Debugf("waiting for snapshot")
-	// 			continue
-	// 		}
-	// 		if err != nil {
-	// 			panic(err)
-	// 		}
-	// 		snapData := new(rspb.RaftSnapshotData)
-	// 		if err := snapData.Unmarshal(snapshot.Data); err != nil {
-	// 			panic(err)
-	// 		}
-	// 		log.Debugf("snapData: %v", snapData.Data)
-	// 		break
-	// 	}
-	// }
-	if err != nil {
-		panic(err)
-	}
+	entries, _ := storage.Entries(fi, li+1)
 	hardState, _, _ := storage.InitialState()
+	log.Debugf("peer newLog committed %d, applied %d", hardState.Commit, fi-1)
+	commit := max(hardState.Commit, fi-1)
 	return &RaftLog{
 		storage:         storage,
-		committed:       hardState.Commit,
+		committed:       commit,
 		applied:         fi-1,
 		stabled:         li,
 		entries:         entries,
-		pendingSnapshot: nil,
 	}
 }
 
@@ -108,6 +90,22 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+	// 从 storage 读取当前的 index 区间
+	log.Debugf("peer [%d] maybeCompact", l.id)
+	if len(l.entries) == 0 {
+		return
+	}
+	fi, _ := l.storage.FirstIndex()
+	log.Debugf("peer [%d] maybeCompact, fi %d, len(entries) %d, first entry %v", l.id, fi, len(l.entries), l.entries[0])
+	if fi > l.entries[0].Index {
+		idx := l.sliceIdx(fi)
+		if idx == -1 {
+			l.entries = nil
+			return
+		}
+
+		l.entries = l.entries[idx+1:]
+	}
 }
 
 // unstableEntries return all the unstable entries
@@ -131,34 +129,29 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
 	// log[applied: committed]
-	// applied/committed 可能在 l.storage 里，所以要和 l.stable 比较
-	sub := l.committed - l.applied
-	var begin int
+	var entries []pb.Entry
 	for idx, ent := range l.entries {
-		if ent.Index == l.applied {
-			begin = idx+1
-			break
+		if ent.Index > l.applied && ent.Index <= l.committed {
+			entries = append(entries, l.entries[idx])
 		}
 	}
-	log.Debugf("peer [%d] nextEnts l.committed %d l.applied %d", l.id, l.committed, l.applied)
-	if begin >= len(l.entries) {
-		log.Debugf("peer [%d] nextEnts return empty entries", l.id)
-		return nil
-	}
-	return l.entries[begin: uint64(begin)+sub]
+	log.Debugf("peer [%d] nextEnts l.committed %d l.applied %d, len(entries) %d", l.id, l.committed, l.applied, len(entries))
+
+	return entries
 }
 
 // LastIndex return the last index of the log entries. next entry index should +1
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
 	if len(l.entries) > 0 {
-		return l.entries[len(l.entries)-1].Index
+		return max(l.entries[len(l.entries)-1].Index, l.compactIndex)
 	}
 	li, err := l.storage.LastIndex()
 	if err != nil {
 		panic(err)
 	}
-	return li
+
+	return max(li, l.compactIndex)
 }
 
 // Term return the term of the entry in the given index
@@ -167,6 +160,12 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 	if i == 0 {
 		return 0, nil
 	}
+	if i < l.compactIndex {
+		return 0, ErrCompacted
+	}
+	if i == l.compactIndex {
+		return l.compactTerm, nil
+	}
 	if len(l.entries) > 0 && l.entries[0].Index <= i {
 		idx := i-l.entries[0].Index
 		if idx >= uint64(len(l.entries)) {
@@ -174,11 +173,7 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 		}
 		return l.entries[idx].Term, nil
 	}
-	term, err := l.storage.Term(i)
-	if err != nil {
-		return 0, nil
-	}
-	return term, nil
+	return l.storage.Term(i)
 }
 
 // TrimToIndex deletes entries whose index >= end
@@ -193,4 +188,13 @@ func (l *RaftLog) TrimToIndex(end uint64) {
 
 func (l *RaftLog) Info() (uint64, uint64) {
 	return l.applied, l.committed
+}
+
+func (l *RaftLog) sliceIdx(index uint64) int {
+	for i, ent := range l.entries {
+		if ent.Index == index {
+			return i
+		}
+	}
+	return -1
 }
