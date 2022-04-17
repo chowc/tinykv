@@ -33,6 +33,10 @@ type SoftState struct {
 	RaftState StateType
 }
 
+func (s SoftState) equal(s1 SoftState) bool {
+	return s.Lead == s1.Lead && s.RaftState == s1.RaftState
+}
+
 // Ready encapsulates the entries and messages that are ready to read,
 // be saved to stable storage, committed or sent to other peers.
 // All fields in Ready are read-only.
@@ -70,6 +74,8 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+
+	prevSoftState SoftState
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
@@ -144,9 +150,7 @@ func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
 	msg := rn.Raft.msgs
 	rn.Raft.msgs = nil
-
 	rd := Ready{
-		SoftState:        nil,
 		HardState:        pb.HardState{},
 		Entries:          rn.Raft.RaftLog.unstableEntries(),
 		Snapshot:         pb.Snapshot{},
@@ -157,6 +161,14 @@ func (rn *RawNode) Ready() Ready {
 		log.Debugf("peer [%d] got snapshot", rn.Raft.id)
 		rd.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
 		rn.Raft.RaftLog.pendingSnapshot = nil
+	}
+	s := SoftState{
+		Lead:      rn.Raft.Lead,
+		RaftState: rn.Raft.State,
+	}
+	if !s.equal(rn.prevSoftState) {
+		rn.prevSoftState = s
+		rd.SoftState = &s
 	}
 	return rd
 }

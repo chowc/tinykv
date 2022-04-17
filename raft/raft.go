@@ -289,6 +289,15 @@ func (r *Raft) sendHeartbeat() {
 	}
 }
 
+func (r *Raft) sendTimeoutNow(to uint64) {
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType:              pb.MessageType_MsgTimeoutNow,
+		To:                   to,
+		From:                 r.id,
+	})
+	r.leadTransferee = None
+}
+
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// log.Debugf()("tick %+v", *r)
@@ -382,6 +391,7 @@ func (r *Raft) becomeLeader() {
 			progress.Match = li
 			progress.Next = li+1
 		} else { // 新 leader 要给 Follower 同步的 index 设为自己最新的日志 index。
+			// TODO: follower 统一 match=0, Next = li+1
 			if li == 0 {
 				progress.Match = 0
 			} else {
@@ -401,6 +411,12 @@ func (r *Raft) Step(m pb.Message) error {
 		r.becomeFollower(m.Term, None)
 	}
 	switch m.MsgType {
+	case pb.MessageType_MsgTransferLeader:
+		r.handleLeaderTransfer(m)
+		return nil
+	case pb.MessageType_MsgTimeoutNow:
+		r.handleTimeoutNow(m)
+		return nil
 	case pb.MessageType_MsgPropose:
 		r.handlePropose(m)
 		return nil
@@ -431,34 +447,7 @@ func (r *Raft) Step(m pb.Message) error {
 		r.handleSnapshot(m)
 		return nil
 	case pb.MessageType_MsgRequestVoteResponse:
-		log.Debugf("VoteResponse [%d], msg: %+v", r.id, m)
-		if r.State != StateCandidate {
-			return nil
-		}
-		r.votes[m.From] = !m.Reject
-		var count, rejectCount int
-		for _, v := range r.votes {
-			if v {
-				count++
-			} else {
-				rejectCount++
-			}
-			if count > len(r.Prs)/2 {
-				r.becomeLeader()
-				return nil
-			}
-			if rejectCount > len(r.Prs)/2 {
-				// TODO: get new leader
-				r.becomeFollower(r.Term, 0)
-				return nil
-			}
-		}
-		// candidate receive higher term vote
-		if m.Term > r.Term || (m.Term == r.Term && m.Commit > r.RaftLog.committed) {
-			r.Term = m.Term
-			r.becomeFollower(m.Term, m.From)
-			return nil
-		}
+		r.handleVoteResponse(m)
 	}
 	return nil
 }
@@ -692,7 +681,6 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 		progress.Match = m.Index
 		progress.Next = m.Index+1
 	}
-
 	committedCount := make(map[uint64]int)
 
 	for _, progress := range r.Prs {
@@ -718,6 +706,9 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	if r.RaftLog.committed < committed {
 		r.RaftLog.committed = committed
 		r.bcastAppend()
+	}
+	if r.leadTransferee != 0 && r.Prs[r.leadTransferee].Match == r.RaftLog.LastIndex() {
+		r.sendTimeoutNow(r.leadTransferee)
 	}
 }
 
@@ -771,6 +762,34 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 
 func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 	r.sendAppend(m.From)
+}
+
+func (r *Raft) handleLeaderTransfer(m pb.Message) {
+	if m.From == 0 {
+		return
+	}
+	if r.State != StateLeader {
+		r.Step(pb.Message{MsgType: pb.MessageType_MsgHup})
+		return
+	}
+	r.leadTransferee = m.From
+	progress, ok := r.Prs[m.From]
+	if !ok {
+		return
+	}
+	li := r.RaftLog.LastIndex()
+	if progress.Match < li { // not catch up
+		r.sendAppend(m.From)
+		return
+	}
+	r.sendTimeoutNow(m.From)
+}
+
+func (r *Raft) handleTimeoutNow(m pb.Message) {
+	if _, ok := r.Prs[m.To]; !ok {
+		return
+	}
+	r.Step(pb.Message{MsgType: pb.MessageType_MsgHup})
 }
 
 func (r *Raft) handlePropose(m pb.Message) {
@@ -869,12 +888,62 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	r.RaftLog.pendingSnapshot = m.Snapshot
 }
 
+func (r *Raft) handleVoteResponse(m pb.Message) {
+	log.Debugf("VoteResponse [%d], msg: %+v", r.id, m)
+	if r.State != StateCandidate {
+		return
+	}
+	if _, ok := r.Prs[m.To]; !ok {
+		return
+	}
+	r.votes[m.From] = !m.Reject
+	var count, rejectCount int
+	for _, v := range r.votes {
+		if v {
+			count++
+		} else {
+			rejectCount++
+		}
+		if count > len(r.Prs)/2 {
+			r.becomeLeader()
+			return
+		}
+		if rejectCount > len(r.Prs)/2 {
+			// TODO: get new leader
+			r.becomeFollower(r.Term, 0)
+			return
+		}
+	}
+	// candidate receive higher term vote
+	if m.Term > r.Term || (m.Term == r.Term && m.Commit > r.RaftLog.committed) {
+		r.Term = m.Term
+		r.becomeFollower(m.Term, m.From)
+	}
+}
+
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	if _, ok := r.Prs[id]; !ok {
+		r.Prs[id] = &Progress{}
+	}
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	if _, ok := r.Prs[id]; ok {
+		delete(r.Prs, id)
+	}
+	// peer 数减少了，部分 entry 可以直接 commit
+	li := r.RaftLog.LastIndex()
+	term, _ := r.RaftLog.Term(li)
+	r.handleAppendResponse(pb.Message{
+		MsgType:              pb.MessageType_MsgAppendResponse,
+		To:                   r.id,
+		From:                 r.id,
+		Term:                 r.Term,
+		LogTerm:              term,
+		Index:                li,
+	})
 }
