@@ -1,6 +1,7 @@
 package raftstore
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/Connor1996/badger"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
@@ -67,6 +68,45 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	for _, ent := range rd.CommittedEntries {
 		var msg raft_cmdpb.RaftCmdRequest
 
+		switch ent.EntryType {
+		case eraftpb.EntryType_EntryConfChange:
+			var cc eraftpb.ConfChange
+			if err := cc.Unmarshal(ent.Data); err != nil {
+				log.Errorf("Unmarshal fail: %v", err)
+				return
+			}
+			// d.Region().RegionEpoch.ConfVer++
+			confState := d.RaftGroup.ApplyConfChange(cc)
+			var peers []*metapb.Peer
+
+			for _, id := range confState.Nodes {
+				peers = append(peers, &metapb.Peer{
+					Id:                   id,
+					StoreId:              d.storeID(),
+				})
+			}
+			if cc.ChangeType == eraftpb.ConfChangeType_RemoveNode && cc.NodeId == d.peer.PeerId() {
+				d.destroyPeer()
+			}
+			d.Region().Peers = peers
+			d.handlePropose(ent, func(proposal *proposal) {
+				resp := &raft_cmdpb.RaftCmdResponse{
+					Header: &raft_cmdpb.RaftResponseHeader{},
+				}
+				resp.AdminResponse = &raft_cmdpb.AdminResponse{
+					CmdType:              raft_cmdpb.AdminCmdType_ChangePeer,
+					ChangePeer:           &raft_cmdpb.ChangePeerResponse{
+						Region:               d.Region(),
+					},
+				}
+				proposal.cb.Done(resp)
+			})
+			if err := d.peerStorage.Engines.WriteKV(wb); err != nil {
+				log.Errorf("WriteKV fail: %+v", err)
+			}
+			wb = &engine_util.WriteBatch{}
+			continue
+		}
 		if err := msg.Unmarshal(ent.Data); err != nil {
 			log.Errorf("Unmarshal fail: %v", err)
 			return
@@ -281,12 +321,26 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		cb.Done(ErrRespRegionNotFound(msg.Header.RegionId))
 		return
 	}
-	data, err := msg.Marshal()
-	if err != nil {
-		log.Errorf("msg Marshal fail: %v", err)
-		cb.Done(ErrResp(err))
-		return
+	if msg.AdminRequest != nil {
+		switch msg.AdminRequest.CmdType {
+		case raft_cmdpb.AdminCmdType_TransferLeader:
+			newLead := msg.AdminRequest.TransferLeader.Peer.Id
+			d.RaftGroup.TransferLeader(newLead)
+			resp := &raft_cmdpb.RaftCmdResponse{
+				Header: &raft_cmdpb.RaftResponseHeader{},
+				AdminResponse: &raft_cmdpb.AdminResponse{
+					CmdType:              msg.AdminRequest.CmdType,
+					TransferLeader:       &raft_cmdpb.TransferLeaderResponse{},
+				},
+			}
+			cb.Done(resp)
+			return
+		}
 	}
+	d.propose(msg, cb)
+}
+
+func (d *peerMsgHandler) propose(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	log.Debugf("peer [%d] proposeRaftCommand: %v", d.RaftGroup.Raft.GetID(), msg)
 	li := d.nextProposalIndex()
 	term := d.Term()
@@ -297,6 +351,28 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	}
 	d.proposals = append(d.proposals, p)
 	log.Debugf("peer [%d] proposeRaftCommand: add proposal %v, msg %v", d.RaftGroup.Raft.GetID(), p, msg)
+	if msg.AdminRequest != nil {
+		switch msg.AdminRequest.CmdType {
+		case raft_cmdpb.AdminCmdType_ChangePeer:
+			req := msg.AdminRequest.ChangePeer
+			cbs, _ := json.Marshal(d.ctx)
+			cc := eraftpb.ConfChange{
+				ChangeType:           req.ChangeType,
+				NodeId:               req.Peer.Id,
+				Context:              cbs,
+			}
+			if err := d.RaftGroup.ProposeConfChange(cc); err != nil {
+				cb.Done(ErrResp(err))
+			}
+			return
+		}
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		log.Errorf("msg Marshal fail: %v", err)
+		cb.Done(ErrResp(err))
+		return
+	}
 	d.RaftGroup.Propose(data)
 }
 

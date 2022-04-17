@@ -655,7 +655,10 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 		return
 	}
 	log.Debugf("peer [%d] handleAppendResponse from %d, msg %v", r.id, m.From, m)
-	progress := r.Prs[m.From]
+	progress, ok := r.Prs[m.From]
+	if !ok {
+		return
+	}
 	if m.Reject == true {
 		// TODO: binary search
 		if progress.Match > 0 {
@@ -766,6 +769,9 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 
 func (r *Raft) handleLeaderTransfer(m pb.Message) {
 	if m.From == 0 {
+		return
+	}
+	if r.Lead == m.From {
 		return
 	}
 	if r.State != StateLeader {
