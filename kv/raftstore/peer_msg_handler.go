@@ -1,6 +1,7 @@
 package raftstore
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/Connor1996/badger"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
@@ -281,6 +282,25 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		cb.Done(ErrRespRegionNotFound(msg.Header.RegionId))
 		return
 	}
+	if msg.AdminRequest != nil {
+		switch msg.AdminRequest.CmdType {
+		case raft_cmdpb.AdminCmdType_TransferLeader:
+			d.RaftGroup.TransferLeader(msg.AdminRequest.TransferLeader.Peer.Id)
+			resp := &raft_cmdpb.RaftCmdResponse{
+				Header: &raft_cmdpb.RaftResponseHeader{},
+				AdminResponse: &raft_cmdpb.AdminResponse{
+					CmdType:              msg.AdminRequest.CmdType,
+					TransferLeader:       &raft_cmdpb.TransferLeaderResponse{},
+				},
+			}
+			cb.Done(resp)
+			return
+		}
+	}
+	d.propose(msg, cb)
+}
+
+func (d *peerMsgHandler) propose(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	data, err := msg.Marshal()
 	if err != nil {
 		log.Errorf("msg Marshal fail: %v", err)
@@ -297,6 +317,22 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	}
 	d.proposals = append(d.proposals, p)
 	log.Debugf("peer [%d] proposeRaftCommand: add proposal %v, msg %v", d.RaftGroup.Raft.GetID(), p, msg)
+	if msg.AdminRequest != nil {
+		switch msg.AdminRequest.CmdType {
+		case raft_cmdpb.AdminCmdType_ChangePeer:
+			req := msg.AdminRequest.ChangePeer
+			cbs, _ := json.Marshal(d.ctx)
+			cc := eraftpb.ConfChange{
+				ChangeType:           req.ChangeType,
+				NodeId:               req.Peer.Id,
+				Context:              cbs,
+			}
+			if err := d.RaftGroup.ProposeConfChange(cc); err != nil {
+				cb.Done(ErrResp(err))
+			}
+			return
+		}
+	}
 	d.RaftGroup.Propose(data)
 }
 
@@ -312,6 +348,38 @@ func (d *peerMsgHandler) handleAdminRequest(msg *raft_cmdpb.RaftCmdRequest, wb *
 			wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
 			d.ScheduleCompactLog(compact.CompactIndex)
 		}
+	case raft_cmdpb.AdminCmdType_ChangePeer:
+		change := msg.AdminRequest.ChangePeer
+		rs := rspb.RegionLocalState{}
+		peers := d.Region().Peers
+		switch change.ChangeType {
+		case eraftpb.ConfChangeType_AddNode:
+			rs.State = rspb.PeerState_Normal
+			peers = append(peers, change.Peer)
+		case eraftpb.ConfChangeType_RemoveNode:
+			rs.State = rspb.PeerState_Tombstone
+			var newPeers []*metapb.Peer
+			for i, peer := range peers {
+				if !util.PeerEqual(peer, change.Peer) {
+					newPeers = append(newPeers, peers[i])
+				}
+				if util.PeerEqual(d.Meta, change.Peer) {
+					d.destroyPeer()
+				}
+			}
+			peers = newPeers
+		}
+		d.Region().Peers = peers
+		rs.Region = d.Region()
+		wb.SetMeta(meta.RegionStateKey(d.regionId), &rs)
+		d.ctx.storeMeta.setRegion(d.Region(), d.peer)
+		cbs, _ := json.Marshal(d.ctx)
+		cc := eraftpb.ConfChange{
+			ChangeType:           change.ChangeType,
+			NodeId:               change.Peer.Id,
+			Context:              cbs,
+		}
+		d.RaftGroup.ApplyConfChange(cc)
 	}
 }
 
