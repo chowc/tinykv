@@ -324,8 +324,7 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	if msg.AdminRequest != nil {
 		switch msg.AdminRequest.CmdType {
 		case raft_cmdpb.AdminCmdType_TransferLeader:
-			newLead := msg.AdminRequest.TransferLeader.Peer.Id
-			d.RaftGroup.TransferLeader(newLead)
+			d.RaftGroup.TransferLeader(msg.AdminRequest.TransferLeader.Peer.Id)
 			resp := &raft_cmdpb.RaftCmdResponse{
 				Header: &raft_cmdpb.RaftResponseHeader{},
 				AdminResponse: &raft_cmdpb.AdminResponse{
@@ -341,6 +340,12 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 }
 
 func (d *peerMsgHandler) propose(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	data, err := msg.Marshal()
+	if err != nil {
+		log.Errorf("msg Marshal fail: %v", err)
+		cb.Done(ErrResp(err))
+		return
+	}
 	log.Debugf("peer [%d] proposeRaftCommand: %v", d.RaftGroup.Raft.GetID(), msg)
 	li := d.nextProposalIndex()
 	term := d.Term()
@@ -388,6 +393,38 @@ func (d *peerMsgHandler) handleAdminRequest(msg *raft_cmdpb.RaftCmdRequest, wb *
 			wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
 			d.ScheduleCompactLog(compact.CompactIndex)
 		}
+	case raft_cmdpb.AdminCmdType_ChangePeer:
+		change := msg.AdminRequest.ChangePeer
+		rs := rspb.RegionLocalState{}
+		peers := d.Region().Peers
+		switch change.ChangeType {
+		case eraftpb.ConfChangeType_AddNode:
+			rs.State = rspb.PeerState_Normal
+			peers = append(peers, change.Peer)
+		case eraftpb.ConfChangeType_RemoveNode:
+			rs.State = rspb.PeerState_Tombstone
+			var newPeers []*metapb.Peer
+			for i, peer := range peers {
+				if !util.PeerEqual(peer, change.Peer) {
+					newPeers = append(newPeers, peers[i])
+				}
+				if util.PeerEqual(d.Meta, change.Peer) {
+					d.destroyPeer()
+				}
+			}
+			peers = newPeers
+		}
+		d.Region().Peers = peers
+		rs.Region = d.Region()
+		wb.SetMeta(meta.RegionStateKey(d.regionId), &rs)
+		d.ctx.storeMeta.setRegion(d.Region(), d.peer)
+		cbs, _ := json.Marshal(d.ctx)
+		cc := eraftpb.ConfChange{
+			ChangeType:           change.ChangeType,
+			NodeId:               change.Peer.Id,
+			Context:              cbs,
+		}
+		d.RaftGroup.ApplyConfChange(cc)
 	}
 }
 
