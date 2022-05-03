@@ -161,6 +161,9 @@ type Raft struct {
 	// value.
 	// (Used in 3A conf change)
 	PendingConfIndex uint64
+
+	hardSt pb.HardState
+	softSt SoftState
 }
 
 // newRaft return a raft peer with the given config
@@ -173,6 +176,7 @@ func newRaft(c *Config) *Raft {
 	if err != nil {
 		panic(err)
 	}
+	log.Debugf("peer [%d] inital hardstate %v", c.ID, hardState)
 	peers := make(map[uint64]*Progress)
 	for _, node := range confState.Nodes {
 		peers[node] = &Progress{}
@@ -186,11 +190,11 @@ func newRaft(c *Config) *Raft {
 	}
 	l.id = c.ID
 	r := &Raft{
-		id:   c.ID,
-		Term: hardState.Term,
-		Vote: hardState.Vote,
+		id:      c.ID,
+		Term:    hardState.Term,
+		Vote:    hardState.Vote,
 		RaftLog: l,
-		Prs:                   peers,
+		Prs:     peers,
 		// When servers start up, they begin as followers
 		State:                 StateFollower,
 		votes:                 nil,
@@ -203,8 +207,17 @@ func newRaft(c *Config) *Raft {
 		electionElapsed:       0,
 		leadTransferee:        0,
 		PendingConfIndex:      0,
+		hardSt:                hardState,
 	}
 	return r
+}
+
+func (r *Raft) hardState() pb.HardState {
+	return r.hardSt
+}
+
+func (r *Raft) softState() SoftState {
+	return r.softSt
 }
 
 func (r *Raft) GetID() uint64 {
@@ -218,12 +231,15 @@ func (r *Raft) sendAppend(to uint64) bool {
 	if r.State != StateLeader {
 		return false
 	}
+	log.Debugf("peer [%d], r.Prs %v", r.id, r.Prs)
 	progress := r.Prs[to]
 	// 如果 progress.Next 被 compact 了，prevIndex 也一定被 compact 了，所以判断 prevIndex 还存不存在
-	prevIndex := progress.Next-1
+	prevIndex := progress.Next - 1
 	prevTerm, err := r.RaftLog.Term(prevIndex)
-	log.Debugf("peer [%d] sendAppend -> [%d], prevIndex %d, prevTerm %d, committed %d, applied %d, progress.Next %d, len(r.RaftLog.entries) %d li %d",
-		r.id, to, prevIndex, prevTerm, r.RaftLog.committed, r.RaftLog.applied, progress.Next, len(r.RaftLog.entries), r.RaftLog.LastIndex())
+	fi, _ := r.RaftLog.storage.FirstIndex()
+	log.Debugf("peer [%d] sendAppend -> [%d], prevIndex %d, prevTerm %d, committed %d, applied %d, progress.Next %d, len(r.RaftLog.entries) %d "+
+		"li %d, firstindex %d, err %v",
+		r.id, to, prevIndex, prevTerm, r.RaftLog.committed, r.RaftLog.applied, progress.Next, len(r.RaftLog.entries), r.RaftLog.LastIndex(), fi, err)
 	if err != nil {
 		if err == ErrCompacted {
 			r.sendSnapshot(to)
@@ -239,14 +255,14 @@ func (r *Raft) sendAppend(to uint64) bool {
 	}
 
 	r.msgs = append(r.msgs, pb.Message{
-		MsgType:              pb.MessageType_MsgAppend,
-		To:                   to,
-		From:                 r.id,
-		Term:                 r.Term,
-		LogTerm:              prevTerm,
-		Index:                prevIndex,
-		Entries:              entries,
-		Commit:               r.RaftLog.committed,
+		MsgType: pb.MessageType_MsgAppend,
+		To:      to,
+		From:    r.id,
+		Term:    r.Term,
+		LogTerm: prevTerm,
+		Index:   prevIndex,
+		Entries: entries,
+		Commit:  r.RaftLog.committed,
 	})
 	return true
 }
@@ -260,11 +276,11 @@ func (r *Raft) sendSnapshot(to uint64) {
 	}
 	log.Debugf("peer [%d] sendSnapshot to [%d], %v", r.id, to, snap)
 	r.msgs = append(r.msgs, pb.Message{
-		MsgType:              pb.MessageType_MsgSnapshot,
-		From:                 r.id,
-		To:                   to,
-		Term:                 r.Term,
-		Snapshot:             &snap,
+		MsgType:  pb.MessageType_MsgSnapshot,
+		From:     r.id,
+		To:       to,
+		Term:     r.Term,
+		Snapshot: &snap,
 	})
 }
 
@@ -278,22 +294,22 @@ func (r *Raft) sendHeartbeat() {
 		prevIndex := progress.Match
 		prevTerm, _ := r.RaftLog.Term(prevIndex)
 		r.msgs = append(r.msgs, pb.Message{
-			MsgType:  pb.MessageType_MsgHeartbeat,
-			From:     r.id,
-			To:       peer,
-			Term:     r.Term,
-			LogTerm:  prevTerm,
-			Index:    prevIndex,
-			Commit:   r.RaftLog.committed,
+			MsgType: pb.MessageType_MsgHeartbeat,
+			From:    r.id,
+			To:      peer,
+			Term:    r.Term,
+			LogTerm: prevTerm,
+			Index:   prevIndex,
+			Commit:  r.RaftLog.committed,
 		})
 	}
 }
 
 func (r *Raft) sendTimeoutNow(to uint64) {
 	r.msgs = append(r.msgs, pb.Message{
-		MsgType:              pb.MessageType_MsgTimeoutNow,
-		To:                   to,
-		From:                 r.id,
+		MsgType: pb.MessageType_MsgTimeoutNow,
+		To:      to,
+		From:    r.id,
 	})
 	r.leadTransferee = None
 }
@@ -329,9 +345,9 @@ func (r *Raft) tickHeartbeat() {
 	r.electionElapsed++
 	if r.heartbeatElapsed >= r.heartbeatTimeout {
 		r.sendMsg(pb.Message{
-			MsgType:  pb.MessageType_MsgHeartbeat,
-			From:     r.id,
-			Term:     r.Term,
+			MsgType: pb.MessageType_MsgHeartbeat,
+			From:    r.id,
+			Term:    r.Term,
 		})
 		r.heartbeatElapsed = 0
 	}
@@ -340,6 +356,7 @@ func (r *Raft) tickHeartbeat() {
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).
+	log.Debugf("peer [%d] becomeFollower in term %d, lead %d", r.id, term, lead)
 	r.State = StateFollower
 	r.Lead = lead
 	r.Term = term
@@ -380,7 +397,7 @@ func (r *Raft) becomeLeader() {
 	r.RaftLog.entries = append(r.RaftLog.entries, pb.Entry{
 		EntryType: pb.EntryType_EntryNormal,
 		Term:      r.Term,
-		Index:     r.RaftLog.LastIndex()+1,
+		Index:     r.RaftLog.LastIndex() + 1,
 	})
 	if len(r.Prs) == 1 {
 		r.RaftLog.committed = r.RaftLog.LastIndex()
@@ -389,13 +406,13 @@ func (r *Raft) becomeLeader() {
 	for peer, progress := range r.Prs {
 		if peer == r.id {
 			progress.Match = li
-			progress.Next = li+1
+			progress.Next = li + 1
 		} else { // 新 leader 要给 Follower 同步的 index 设为自己最新的日志 index。
 			// TODO: follower 统一 match=0, Next = li+1
 			if li == 0 {
 				progress.Match = 0
 			} else {
-				progress.Match = li-1
+				progress.Match = li - 1
 			}
 			progress.Next = li
 		}
@@ -464,11 +481,11 @@ func (r *Raft) campaign() {
 	li := r.RaftLog.LastIndex()
 	term, _ := r.RaftLog.Term(li)
 	r.sendMsg(pb.Message{
-		MsgType:  pb.MessageType_MsgRequestVote,
-		From:     r.id,
-		Term:     r.Term,
-		LogTerm:  term,
-		Index:    li,
+		MsgType: pb.MessageType_MsgRequestVote,
+		From:    r.id,
+		Term:    r.Term,
+		LogTerm: term,
+		Index:   li,
 	})
 	log.Debugf("peer [%d] send vote request at term %d, lastindex [%d], lastterm [%d]", r.id, r.Term, li, term)
 }
@@ -519,14 +536,14 @@ func (r *Raft) acceptVote(m pb.Message) {
 	r.Vote = m.From
 	r.Lead = None
 	r.msgs = append(r.msgs, pb.Message{
-		MsgType:  pb.MessageType_MsgRequestVoteResponse,
-		To:       m.From,
-		From:     r.id,
-		Term:     r.Term,
-		LogTerm:  term,
-		Index:    li,
-		Entries:  nil,
-		Commit:   r.RaftLog.committed,
+		MsgType: pb.MessageType_MsgRequestVoteResponse,
+		To:      m.From,
+		From:    r.id,
+		Term:    r.Term,
+		LogTerm: term,
+		Index:   li,
+		Entries: nil,
+		Commit:  r.RaftLog.committed,
 	})
 }
 
@@ -545,6 +562,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
 	log.Debugf("peer [%d] handleAppendEntries from %d, msg %v", r.id, m.From, m)
 	if m.Term < r.Term {
+		goto reject
 		return
 	}
 	r.electionElapsed = 0
@@ -570,7 +588,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			log.Debugf("peer [%d] reject current term [%d] current leader [%d], new leader [%d], m.term %d", r.id, r.Term, r.Lead, m.From, m.Term)
 			goto reject
 		}
-		li:= r.RaftLog.LastIndex()
+		li := r.RaftLog.LastIndex()
 		log.Debugf("peer [%d] lastindex %d, m.Index %d, m.entries %v", r.id, li, m.Index, m.Entries)
 		if m.Index > li { // follower 的日志和 message 的 entries 不能对接上
 			goto reject
@@ -604,7 +622,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 						r.RaftLog.TrimToIndex(ent.Index)
 						r.RaftLog.entries = append(r.RaftLog.entries, *ent)
 						// TODO: 这里需要更新 r.RaftLog.storage？
-						r.RaftLog.stabled = ent.Index-1
+						r.RaftLog.stabled = ent.Index - 1
 						doAppend = true
 					}
 					continue
@@ -626,12 +644,12 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 
 		term, _ = r.RaftLog.Term(li)
 		r.msgs = append(r.msgs, pb.Message{
-			MsgType:              pb.MessageType_MsgAppendResponse,
-			To:                   m.From,
-			From:                 r.id,
-			Term:                 r.Term,
-			LogTerm:              term,
-			Index:                li, // 当前确认收到的最大 index
+			MsgType: pb.MessageType_MsgAppendResponse,
+			To:      m.From,
+			From:    r.id,
+			Term:    r.Term,
+			LogTerm: term,
+			Index:   li, // 当前确认收到的最大 index
 		})
 		return
 	}
@@ -640,13 +658,13 @@ reject:
 	li := r.RaftLog.LastIndex()
 	term, _ := r.RaftLog.Term(li)
 	r.msgs = append(r.msgs, pb.Message{
-		MsgType:              pb.MessageType_MsgAppendResponse,
-		To:                   m.From,
-		From:                 r.id,
-		Term:                 r.Term,
-		LogTerm:              term,
-		Index:                li,
-		Reject:               true,
+		MsgType: pb.MessageType_MsgAppendResponse,
+		To:      m.From,
+		From:    r.id,
+		Term:    r.Term,
+		LogTerm: term,
+		Index:   li,
+		Reject:  true,
 	})
 }
 
@@ -682,7 +700,7 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	}
 	if progress.Match < m.Index {
 		progress.Match = m.Index
-		progress.Next = m.Index+1
+		progress.Next = m.Index + 1
 	}
 	committedCount := make(map[uint64]int)
 
@@ -695,12 +713,12 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	}
 	sort.Ints(keys)
 	count := 0
-	for i:=len(keys)-1; i>=0; i-- {
+	for i := len(keys) - 1; i >= 0; i-- {
 		committedCount[uint64(keys[i])] += count
 		count += committedCount[uint64(keys[i])]
 	}
 	var committed uint64
-	for i:=len(keys)-1; i>=0; i-- {
+	for i := len(keys) - 1; i >= 0; i-- {
 		if committedCount[uint64(keys[i])] > len(r.Prs)/2 {
 			committed = uint64(keys[i])
 			break
@@ -719,7 +737,8 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
 	if r.Term > m.Term {
-		log.Debugf("peer [%d] r.Term [%d] > [%d] m.Term [%d], reject heartbeat", r.id, r.Term, m.Term, m.From)
+		//
+		log.Debugf("peer [%d] r.Term [%d] > [%d] m.Term [%d], reject heartbeat", r.id, r.Term, m.From, m.Term)
 		return
 	}
 	r.electionElapsed = 0
@@ -730,13 +749,13 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	}
 	if li < m.Commit { // 缺少日志
 		r.msgs = append(r.msgs, pb.Message{
-			MsgType:              pb.MessageType_MsgAppendResponse, // 触发 leader 重发 AppendRequest
-			To:                   m.From,
-			From:                 r.id,
-			Term:                 r.Term,
-			LogTerm:              term,
-			Index:                li,
-			Reject:               true,
+			MsgType: pb.MessageType_MsgAppendResponse, // 触发 leader 重发 AppendRequest
+			To:      m.From,
+			From:    r.id,
+			Term:    r.Term,
+			LogTerm: term,
+			Index:   li,
+			Reject:  true,
 		})
 		return
 	}
@@ -754,12 +773,12 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	//	higher than follower's, the follower updates its leaderID with the ID
 	//	from the message.
 	r.msgs = append(r.msgs, pb.Message{
-		MsgType:              pb.MessageType_MsgHeartbeatResponse,
-		To:                   m.From,
-		From:                 r.id,
-		Term:                 r.Term,
-		LogTerm:              term,
-		Index:                li,
+		MsgType: pb.MessageType_MsgHeartbeatResponse,
+		To:      m.From,
+		From:    r.id,
+		Term:    r.Term,
+		LogTerm: term,
+		Index:   li,
 	})
 }
 
@@ -768,6 +787,7 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 }
 
 func (r *Raft) handleLeaderTransfer(m pb.Message) {
+	log.Debugf("peer [%d] handleLeaderTransfer %v", r.id, m)
 	if m.From == 0 {
 		return
 	}
@@ -804,7 +824,7 @@ func (r *Raft) handlePropose(m pb.Message) {
 	}
 	for idx := range m.Entries {
 		m.Entries[idx].Term = r.Term
-		m.Entries[idx].Index = r.RaftLog.LastIndex()+1
+		m.Entries[idx].Index = r.RaftLog.LastIndex() + 1
 		log.Debugf("peer [%d] propose msg index: [%d], data %v", r.id, m.Entries[idx].Index, m.Entries[idx].Data)
 		m.LogTerm = r.Term
 
@@ -816,7 +836,7 @@ func (r *Raft) handlePropose(m pb.Message) {
 		})
 	}
 	r.Prs[r.id].Match = r.RaftLog.LastIndex()
-	r.Prs[r.id].Next = r.RaftLog.LastIndex()+1
+	r.Prs[r.id].Next = r.RaftLog.LastIndex() + 1
 	if len(r.Prs) == 1 { // 只有一个节点，直接 commit
 		r.RaftLog.committed = r.RaftLog.LastIndex()
 		return
@@ -848,20 +868,21 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 		li := r.RaftLog.LastIndex()
 		term, _ := r.RaftLog.Term(li)
 		r.msgs = append(r.msgs, pb.Message{
-			MsgType:              pb.MessageType_MsgAppendResponse,
-			To:                   m.From,
-			From:                 r.id,
-			Term:                 r.Term,
-			LogTerm:              term,
-			Index:                li,
+			MsgType: pb.MessageType_MsgAppendResponse,
+			To:      m.From,
+			From:    r.id,
+			Term:    r.Term,
+			LogTerm: term,
+			Index:   li,
 		})
 		log.Debugf("peer [%d] stale snapshot, lastindex %d, lastterm %d, dont apply", r.id, li, term)
 		return
 	}
-	if r.Term > m.Term {
-		return
-	}
-	r.Lead = m.From
+	// if r.Term > m.Term {
+	// 	return
+	// }
+	r.becomeFollower(max(r.Term, m.Term), m.From)
+	// r.Lead = m.From
 	r.RaftLog.applied = snapIndex
 	r.RaftLog.committed = snapIndex
 	if r.RaftLog.compactIndex < r.RaftLog.applied {
@@ -884,12 +905,12 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	li := max(r.RaftLog.LastIndex(), r.RaftLog.compactIndex)
 	term, _ := r.RaftLog.Term(li)
 	r.msgs = append(r.msgs, pb.Message{
-		MsgType:              pb.MessageType_MsgAppendResponse,
-		To:                   m.From,
-		From:                 r.id,
-		Term:                 r.Term,
-		LogTerm:              term,
-		Index:                li,
+		MsgType: pb.MessageType_MsgAppendResponse,
+		To:      m.From,
+		From:    r.id,
+		Term:    r.Term,
+		LogTerm: term,
+		Index:   li,
 	})
 	r.RaftLog.pendingSnapshot = m.Snapshot
 }
@@ -931,7 +952,9 @@ func (r *Raft) handleVoteResponse(m pb.Message) {
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
 	if _, ok := r.Prs[id]; !ok {
-		r.Prs[id] = &Progress{}
+		r.Prs[id] = &Progress{
+			Next: 1,
+		}
 	}
 }
 
@@ -945,11 +968,11 @@ func (r *Raft) removeNode(id uint64) {
 	li := r.RaftLog.LastIndex()
 	term, _ := r.RaftLog.Term(li)
 	r.handleAppendResponse(pb.Message{
-		MsgType:              pb.MessageType_MsgAppendResponse,
-		To:                   r.id,
-		From:                 r.id,
-		Term:                 r.Term,
-		LogTerm:              term,
-		Index:                li,
+		MsgType: pb.MessageType_MsgAppendResponse,
+		To:      r.id,
+		From:    r.id,
+		Term:    r.Term,
+		LogTerm: term,
+		Index:   li,
 	})
 }

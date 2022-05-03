@@ -76,11 +76,17 @@ type RawNode struct {
 	// Your Data Here (2A).
 
 	prevSoftState SoftState
+	prevHardState pb.HardState
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
-	return &RawNode{Raft: newRaft(config)}, nil
+	r := newRaft(config)
+	return &RawNode{
+		Raft:          r,
+		prevHardState: r.hardState(),
+		prevSoftState: r.softState(),
+	}, nil
 }
 
 // Tick advances the internal logical clock by a single tick.
@@ -151,17 +157,18 @@ func (rn *RawNode) Ready() Ready {
 	msg := rn.Raft.msgs
 	rn.Raft.msgs = nil
 	rd := Ready{
-		HardState:        pb.HardState{},
 		Entries:          rn.Raft.RaftLog.unstableEntries(),
 		Snapshot:         pb.Snapshot{},
 		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
 		Messages:         msg,
 	}
+
 	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
 		log.Debugf("peer [%d] got snapshot", rn.Raft.id)
 		rd.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
 		rn.Raft.RaftLog.pendingSnapshot = nil
 	}
+
 	s := SoftState{
 		Lead:      rn.Raft.Lead,
 		RaftState: rn.Raft.State,
@@ -170,6 +177,15 @@ func (rn *RawNode) Ready() Ready {
 		rn.prevSoftState = s
 		rd.SoftState = &s
 	}
+	hardSt := pb.HardState{
+		Term:   rn.Raft.Term,
+		Vote:   rn.Raft.Vote,
+		Commit: rn.Raft.RaftLog.committed,
+	}
+	if !isHardStateEqual(rn.prevHardState, hardSt) {
+		rd.HardState = hardSt
+		rn.prevHardState = hardSt
+	}
 	return rd
 }
 
@@ -177,7 +193,12 @@ func (rn *RawNode) Ready() Ready {
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
 	return len(rn.Raft.RaftLog.unstableEntries()) > 0 || len(rn.Raft.RaftLog.nextEnts()) > 0 || len(rn.Raft.msgs) > 0 ||
-		!IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot)
+		!IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) ||
+		!isHardStateEqual(rn.prevHardState, pb.HardState{
+			Term:   rn.Raft.Term,
+			Vote:   rn.Raft.Vote,
+			Commit: rn.Raft.RaftLog.committed,
+		})
 }
 
 // Advance notifies the RawNode that the application has applied and saved progress in the
@@ -191,6 +212,9 @@ func (rn *RawNode) Advance(rd Ready) {
 	if len(rd.CommittedEntries) > 0 {
 		newApplied = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
 	}
+	// if !isHardStateEqual(rd.HardState, rn.prevHardState) {
+	// 	rn.prevHardState = rd.HardState
+	// }
 	rn.Raft.Advance(newStabled, newApplied)
 }
 

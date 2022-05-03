@@ -3,9 +3,11 @@ package meta
 import (
 	"github.com/Connor1996/badger"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
+	llog "github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	rspb "github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
+	log "github.com/sirupsen/logrus"
 )
 
 func GetRegionLocalState(db *badger.DB, regionId uint64) (*rspb.RegionLocalState, error) {
@@ -52,6 +54,7 @@ func InitRaftLocalState(raftEngine *badger.DB, region *metapb.Region) (*rspb.Raf
 	if err != nil && err != badger.ErrKeyNotFound {
 		return nil, err
 	}
+	llog.Debugf("InitRaftLocalState region id %v, err %v", region, err)
 	if err == badger.ErrKeyNotFound {
 		raftState = new(rspb.RaftLocalState)
 		raftState.HardState = new(eraftpb.HardState)
@@ -72,6 +75,7 @@ func InitRaftLocalState(raftEngine *badger.DB, region *metapb.Region) (*rspb.Raf
 
 func InitApplyState(kvEngine *badger.DB, region *metapb.Region) (*rspb.RaftApplyState, error) {
 	applyState, err := GetApplyState(kvEngine, region.Id)
+	log.Debugf("InitApplyState get region %v, state %v", region, applyState)
 	if err != nil && err != badger.ErrKeyNotFound {
 		return nil, err
 	}

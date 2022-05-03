@@ -340,7 +340,7 @@ func (m *MockSchedulerClient) handleHeartbeatConfVersion(region *metapb.Region) 
 
 	regionPeerLen := len(region.GetPeers())
 	searchRegionPeerLen := len(searchRegion.GetPeers())
-
+	log.Debugf("searchRegion: %v, region: %v", searchRegion, region)
 	if region.RegionEpoch.ConfVer > searchRegion.RegionEpoch.ConfVer {
 		// If ConfVer changed, TinyKV has added/removed one peer already.
 		// So scheduler and TinyKV can't have same peer count and can only have
@@ -534,6 +534,7 @@ func (m *MockSchedulerClient) scheduleOperator(regionID uint64, op *Operator) {
 // Utilities
 func MustSamePeers(left *metapb.Region, right *metapb.Region) {
 	if len(left.GetPeers()) != len(right.GetPeers()) {
+		log.Errorf("left %v, right %v", left.GetPeers(), right.GetPeers())
 		panic("unmatched peers length")
 	}
 	for _, p := range left.GetPeers() {

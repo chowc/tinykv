@@ -57,7 +57,7 @@ type RaftLog struct {
 	id uint64
 
 	compactIndex uint64
-	compactTerm uint64
+	compactTerm  uint64
 }
 
 // newLog returns log using the given storage. It recovers the log
@@ -77,11 +77,11 @@ func newLog(storage Storage) *RaftLog {
 	log.Debugf("peer newLog committed %d, applied %d", hardState.Commit, fi-1)
 	commit := max(hardState.Commit, fi-1)
 	return &RaftLog{
-		storage:         storage,
-		committed:       commit,
-		applied:         fi-1,
-		stabled:         li,
-		entries:         entries,
+		storage:   storage,
+		committed: commit,
+		applied:   fi - 1,
+		stabled:   li,
+		entries:   entries,
 	}
 }
 
@@ -116,7 +116,7 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 	var begin int
 	for idx, ent := range l.entries {
 		if ent.Index == l.stabled {
-			begin = idx+1
+			begin = idx + 1
 		}
 	}
 	if begin >= len(l.entries) {
@@ -157,17 +157,18 @@ func (l *RaftLog) LastIndex() uint64 {
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	if i == 0 {
-		return 0, nil
-	}
+	// if i == 0 {
+	// 	return 0, nil
+	// }
 	if i < l.compactIndex {
 		return 0, ErrCompacted
 	}
-	if i == l.compactIndex {
+	if l.compactIndex != 0 && i == l.compactIndex {
 		return l.compactTerm, nil
 	}
 	if len(l.entries) > 0 && l.entries[0].Index <= i {
-		idx := i-l.entries[0].Index
+		log.Debugf("l.entries[0].Index %d <= i %d", l.entries[0].Index, i)
+		idx := i - l.entries[0].Index
 		if idx >= uint64(len(l.entries)) {
 			return 0, nil
 		}

@@ -17,6 +17,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 	"github.com/stretchr/testify/assert"
+	_ "net/http/pprof"
 )
 
 // a client runs the function f and then signals it is done
@@ -218,9 +219,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 					v := string(bytes.Join(values, []byte("")))
 					if v != last {
 						log.Fatalf("get wrong value, client %v\nwant:%v\ngot: %v\n", cli, last, v)
-					}/* else {
-						log.Infof("get right value, client %v\nwant:%v\ngot: %v\n", cli, last, v)
-					}*/
+					}
 				}
 			}
 		})
@@ -546,9 +545,13 @@ func TestBasicConfChange3B(t *testing.T) {
 
 	cluster.MustTransferLeader(1, NewPeer(1, 1))
 	cluster.MustRemovePeer(1, NewPeer(2, 2))
+	log.Debugf("remove peer 2")
 	cluster.MustRemovePeer(1, NewPeer(3, 3))
+	log.Debugf("remove peer 3")
 	cluster.MustRemovePeer(1, NewPeer(4, 4))
+	log.Debugf("remove peer 4")
 	cluster.MustRemovePeer(1, NewPeer(5, 5))
+	log.Debugf("remove peer 5")
 
 	// now region 1 only has peer: (1, 1)
 	cluster.MustPut([]byte("k1"), []byte("v1"))
@@ -556,6 +559,7 @@ func TestBasicConfChange3B(t *testing.T) {
 
 	// add peer (2, 2) to region 1
 	cluster.MustAddPeer(1, NewPeer(2, 2))
+	log.Debugf("readd peer 2")
 	cluster.MustPut([]byte("k2"), []byte("v2"))
 	cluster.MustGet([]byte("k2"), []byte("v2"))
 	MustGetEqual(cluster.engines[2], []byte("k1"), []byte("v1"))
@@ -569,7 +573,9 @@ func TestBasicConfChange3B(t *testing.T) {
 
 	// add peer (3, 3) to region 1
 	cluster.MustAddPeer(1, NewPeer(3, 3))
+	log.Debugf("readd peer 3")
 	cluster.MustRemovePeer(1, NewPeer(2, 2))
+	log.Debugf("reremove peer 2")
 
 	cluster.MustPut([]byte("k3"), []byte("v3"))
 	cluster.MustGet([]byte("k3"), []byte("v3"))
@@ -582,12 +588,14 @@ func TestBasicConfChange3B(t *testing.T) {
 	MustGetNone(cluster.engines[2], []byte("k2"))
 
 	cluster.MustAddPeer(1, NewPeer(2, 2))
+	log.Debugf("re re add peer 2")
 	MustGetEqual(cluster.engines[2], []byte("k1"), []byte("v1"))
 	MustGetEqual(cluster.engines[2], []byte("k2"), []byte("v2"))
 	MustGetEqual(cluster.engines[2], []byte("k3"), []byte("v3"))
 
 	// remove peer (2, 2) from region 1
 	cluster.MustRemovePeer(1, NewPeer(2, 2))
+	log.Debugf("re re remove peer 2")
 	// add peer (2, 4) to region 1
 	cluster.MustAddPeer(1, NewPeer(2, 4))
 	// remove peer (3, 3) from region 1

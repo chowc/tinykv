@@ -274,7 +274,7 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 	start := time.Now()
 	kvWB.DeleteMeta(meta.RegionStateKey(regionID))
 	kvWB.DeleteMeta(meta.ApplyStateKey(regionID))
-
+	log.Debugf("delete meta regionID %d, meta.ApplyStateKey(regionID) %v", regionID, meta.ApplyStateKey(regionID))
 	firstIndex := lastIndex + 1
 	beginLogKey := meta.RaftLogKey(regionID, 0)
 	endLogKey := meta.RaftLogKey(regionID, firstIndex)
@@ -325,7 +325,7 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 		entries = entries[first-firstEntry.Index:]
 	}
 
-	lastIndex := ps.raftState.LastIndex
+	lastIndex, _ := ps.LastIndex()
 
 	for _, ent := range entries {
 		key := meta.RaftLogKey(ps.region.Id, ent.Index)
@@ -334,11 +334,12 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 	}
 
 	log.Debugf("delete entry range [%d, %d)", lastEntry.Index+1, lastIndex)
-	for i:=lastEntry.Index+1; i<lastIndex; i++ {
+	for i := lastEntry.Index + 1; i < lastIndex; i++ {
 		key := meta.RaftLogKey(ps.region.Id, i)
 		log.Debugf("DeleteMeta entry [%d]", i)
 		raftWB.DeleteMeta(key)
 	}
+	log.Debugf("peer update last index to %d", lastEntry.Index)
 	ps.raftState.LastIndex = lastEntry.Index
 	ps.raftState.LastTerm = lastEntry.Term
 	return nil
@@ -386,7 +387,7 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 		EndKey:   snapData.Region.EndKey,
 	}
 	log.Debugf("before ch")
-	<- ch
+	<-ch
 	log.Debugf("after ch")
 	meta.WriteRegionState(kvWB, snapData.Region, rspb.PeerState_Normal)
 	return result, nil
