@@ -85,6 +85,7 @@ func (r *SchedulerTaskHandler) onRegionHeartbeatResponse(resp *schedulerpb.Regio
 }
 
 func (r *SchedulerTaskHandler) onAskSplit(t *SchedulerAskSplitTask) {
+	// request pb to get unique new region id and peer ids.
 	resp, err := r.SchedulerClient.AskSplit(context.TODO(), t.Region)
 	if err != nil {
 		log.Error(err)
@@ -99,6 +100,7 @@ func (r *SchedulerTaskHandler) onAskSplit(t *SchedulerAskSplitTask) {
 			NewPeerIds:  resp.NewPeerIds,
 		},
 	}
+	// send request so peer_msg_handler will start handle region split task.
 	r.sendAdminRequest(t.Region.GetId(), t.Region.GetRegionEpoch(), t.Peer, aq, t.Callback)
 }
 

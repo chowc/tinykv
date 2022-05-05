@@ -115,7 +115,7 @@ func getRequestKey(req *raft_cmdpb.Request) []byte {
 func (d *peerMsgHandler) handleCommittedEntry(ent eraftpb.Entry, wb *engine_util.WriteBatch) {
 	var msg raft_cmdpb.RaftCmdRequest
 	raftID := d.Meta.Id
-	if d.isAdminPropose(ent) {
+	if d.isConfChangePropose(ent) {
 		log.Debugf("handle admin propose")
 		switch ent.EntryType {
 		case eraftpb.EntryType_EntryConfChange:
@@ -253,7 +253,7 @@ func (d *peerMsgHandler) handlePropose(ent eraftpb.Entry, fn func(proposal *prop
 	}
 }
 
-func (d *peerMsgHandler) isAdminPropose(ent eraftpb.Entry) bool {
+func (d *peerMsgHandler) isConfChangePropose(ent eraftpb.Entry) bool {
 	return ent.EntryType == eraftpb.EntryType_EntryConfChange
 }
 
@@ -414,7 +414,6 @@ func (d *peerMsgHandler) handleAdminRequest(msg *raft_cmdpb.RaftCmdRequest, chan
 			d.ScheduleCompactLog(compact.CompactIndex)
 		}
 	case raft_cmdpb.AdminCmdType_ChangePeer:
-		// change := msg.AdminRequest.ChangePeer
 		log.Debugf("peer [%d] change peer %v", d.PeerId(), change)
 
 		if change.ChangeType == eraftpb.ConfChangeType_RemoveNode && d.PeerId() == change.NodeId {
@@ -458,6 +457,48 @@ func (d *peerMsgHandler) handleAdminRequest(msg *raft_cmdpb.RaftCmdRequest, chan
 			d.removePeerCache(change.NodeId)
 		}
 		d.RaftGroup.ApplyConfChange(*change)
+	case raft_cmdpb.AdminCmdType_Split:
+		log.Debugf("peer [%d] handle split admin request", d.PeerId())
+		split := msg.AdminRequest.Split
+		// CmdType: raft_cmdpb.AdminCmdType_Split,
+		// 	Split: &raft_cmdpb.SplitRequest{
+		// 	SplitKey:    t.SplitKey,
+		// 	NewRegionId: resp.NewRegionId,
+		// 	NewPeerIds:  resp.NewPeerIds,
+		// },
+		d.Region().RegionEpoch.Version++
+		newRegion := metapb.Region{
+			Id:          split.NewRegionId,
+			StartKey:    split.SplitKey,
+			EndKey:      d.Region().EndKey,
+			RegionEpoch: d.Region().RegionEpoch,
+			Peers: func() []*metapb.Peer {
+				var peers []*metapb.Peer
+				for _, o := range split.NewPeerIds {
+					peers = append(peers, &metapb.Peer{
+						Id:      o,
+						StoreId: d.storeID(),
+					})
+				}
+				return peers
+			}(),
+		}
+
+		for range split.NewPeerIds {
+			p, err := createPeer(d.storeID(), d.ctx.cfg, d.ctx.schedulerTaskSender, d.peerStorage.Engines, &newRegion)
+			if err != nil {
+				panic(err)
+			}
+			d.ctx.router.register(p)
+		}
+		// newRegion.
+		d.Region().EndKey = msg.AdminRequest.Split.SplitKey
+		storeMeta := d.ctx.storeMeta
+		storeMeta.Lock()
+		storeMeta.regions[split.NewRegionId] = &newRegion
+		// storeMeta.regionRanges.Delete(&regionItem{region: d.Region()})
+		storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: &newRegion})
+		storeMeta.Unlock()
 	}
 }
 
