@@ -3,6 +3,7 @@ package test_raftstore
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"sync"
 
 	"github.com/google/btree"
@@ -195,6 +196,7 @@ func (m *MockSchedulerClient) GetRegion(ctx context.Context, key []byte) (*metap
 func (m *MockSchedulerClient) getRegionLocked(key []byte) (*metapb.Region, *metapb.Peer) {
 	result := m.findRegion(key)
 	if result == nil {
+		log.Debugf("findRegion key %s, nil", hex.EncodeToString(key))
 		return nil, nil
 	}
 
@@ -340,7 +342,7 @@ func (m *MockSchedulerClient) handleHeartbeatConfVersion(region *metapb.Region) 
 
 	regionPeerLen := len(region.GetPeers())
 	searchRegionPeerLen := len(searchRegion.GetPeers())
-	log.Debugf("searchRegion: %v, region: %v", searchRegion, region)
+	log.Debugf("searchRegion: %+v, region: %+v", searchRegion, region)
 	if region.RegionEpoch.ConfVer > searchRegion.RegionEpoch.ConfVer {
 		// If ConfVer changed, TinyKV has added/removed one peer already.
 		// So scheduler and TinyKV can't have same peer count and can only have
@@ -457,7 +459,7 @@ func (m *MockSchedulerClient) Close() {
 
 func (m *MockSchedulerClient) findRegion(key []byte) *regionItem {
 	item := &regionItem{region: metapb.Region{StartKey: key}}
-
+	log.Debugf("regionsRange %+v", m.regionsRange)
 	var result *regionItem
 	m.regionsRange.DescendLessOrEqual(item, func(i btree.Item) bool {
 		result = i.(*regionItem)

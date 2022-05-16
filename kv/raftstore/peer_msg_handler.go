@@ -78,6 +78,10 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	log.Debugf("peer [%d] HandleRaftReady: entries %d committed entry %d", raftID, len(rd.Entries), len(rd.CommittedEntries))
 
 	wb := &engine_util.WriteBatch{}
+	// 这里存在一个特殊情况，就是所谓的“空日志”。在 raft-rs 的实现中，当选举出新的 Leader 时，新 Leader 会广播一条“空日志”，
+	// 以提交前面 term 中的日志（详情请见 Raft 论文）。此时，可能还有一些在前面 term 中提出的 proposal 仍然处于 pending 阶段，
+	// 而因为有新 Leader 产生，这些 proposal 永远不可能被确认了，
+	// 因此我们需要对它们进行清理，以免关联的 callback无法调用导致一些资源无法释放。
 	for _, ent := range rd.CommittedEntries {
 		d.handleCommittedEntry(ent, wb)
 		if d.stopped {
@@ -458,8 +462,8 @@ func (d *peerMsgHandler) handleAdminRequest(msg *raft_cmdpb.RaftCmdRequest, chan
 		}
 		d.RaftGroup.ApplyConfChange(*change)
 	case raft_cmdpb.AdminCmdType_Split:
-		log.Debugf("peer [%d] handle split admin request", d.PeerId())
 		split := msg.AdminRequest.Split
+		log.Debugf("peer [%d] handle split admin request, split %v", d.PeerId(), split)
 		// CmdType: raft_cmdpb.AdminCmdType_Split,
 		// 	Split: &raft_cmdpb.SplitRequest{
 		// 	SplitKey:    t.SplitKey,
@@ -468,10 +472,13 @@ func (d *peerMsgHandler) handleAdminRequest(msg *raft_cmdpb.RaftCmdRequest, chan
 		// },
 		d.Region().RegionEpoch.Version++
 		newRegion := metapb.Region{
-			Id:          split.NewRegionId,
-			StartKey:    split.SplitKey,
-			EndKey:      d.Region().EndKey,
-			RegionEpoch: d.Region().RegionEpoch,
+			Id:       split.NewRegionId,
+			StartKey: split.SplitKey,
+			EndKey:   d.Region().EndKey,
+			RegionEpoch: &metapb.RegionEpoch{
+				ConfVer: 1,
+				Version: 1,
+			},
 			Peers: func() []*metapb.Peer {
 				var peers []*metapb.Peer
 				for _, o := range split.NewPeerIds {
@@ -480,25 +487,36 @@ func (d *peerMsgHandler) handleAdminRequest(msg *raft_cmdpb.RaftCmdRequest, chan
 						StoreId: d.storeID(),
 					})
 				}
+				log.Debugf("peer [%d] new peers %+v", d.PeerId(), peers)
 				return peers
 			}(),
 		}
 
-		for range split.NewPeerIds {
-			p, err := createPeer(d.storeID(), d.ctx.cfg, d.ctx.schedulerTaskSender, d.peerStorage.Engines, &newRegion)
-			if err != nil {
-				panic(err)
-			}
-			d.ctx.router.register(p)
+		p, err := createPeer(d.ctx.store.Id, d.ctx.cfg, d.ctx.schedulerTaskSender, d.ctx.engine, &newRegion)
+		if err != nil {
+			panic(err)
 		}
-		// newRegion.
-		d.Region().EndKey = msg.AdminRequest.Split.SplitKey
+		d.ctx.router.register(p)
+		d.ctx.router.send(newRegion.Id, message.Msg{Type: message.MsgTypeStart})
+		state := new(rspb.RegionLocalState)
+		state.Region = &newRegion
+		kvWB := new(engine_util.WriteBatch)
+		kvWB.SetMeta(meta.PrepareBootstrapKey, state)
+		kvWB.SetMeta(meta.RegionStateKey(newRegion.Id), state)
+		writeInitialApplyState(kvWB, newRegion.Id)
+		raftWB := new(engine_util.WriteBatch)
+		writeInitialRaftState(raftWB, newRegion.Id)
+		d.Region().EndKey = split.SplitKey
 		storeMeta := d.ctx.storeMeta
 		storeMeta.Lock()
 		storeMeta.regions[split.NewRegionId] = &newRegion
-		// storeMeta.regionRanges.Delete(&regionItem{region: d.Region()})
 		storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: &newRegion})
+		storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
 		storeMeta.Unlock()
+		log.Debugf("storeMeta.regionRanges %+v", storeMeta.regionRanges)
+		if d.IsLeader() {
+			d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
+		}
 	}
 }
 

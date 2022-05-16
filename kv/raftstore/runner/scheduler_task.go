@@ -116,7 +116,10 @@ func (r *SchedulerTaskHandler) onHeartbeat(t *SchedulerRegionHeartbeatTask) {
 		PendingPeers:    t.PendingPeers,
 		ApproximateSize: uint64(size),
 	}
-	r.SchedulerClient.RegionHeartbeat(req)
+	err := r.SchedulerClient.RegionHeartbeat(req)
+	if err != nil {
+		log.Error("RegionHeartbeat fail: %v", err)
+	}
 }
 
 func (r *SchedulerTaskHandler) onStoreHeartbeat(t *SchedulerStoreHeartbeatTask) {
